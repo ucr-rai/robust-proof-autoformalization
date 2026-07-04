@@ -1,0 +1,10 @@
+google-genai
+datasets
+openai
+tqdm
+portpicker
+nest_asyncio
+python-dotenv
+huggingface_hub
+torch
+vllm
