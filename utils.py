@@ -16,8 +16,12 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 
 
 # ── JSONL IO ─────────────────────────────────────────────────────────────────
@@ -44,22 +48,30 @@ def ensure_dir(path: str | Path) -> Path:
 
 # ── Gemini (google-genai SDK) ────────────────────────────────────────────────
 
-_SAFETY_OFF = [
-    types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE)
-    for c in (
-        types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-    )
-]
+def _safety_off():
+    if types is None:
+        return []
+    return [
+        types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE)
+        for c in (
+            types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        )
+    ]
+
+
+_SAFETY_OFF = _safety_off()
 
 
 class _GeminiModel:
     """Thin adapter exposing the legacy ``.generate_content(prompt).text`` API
     over the google-genai client, so call sites don't need to change."""
 
-    def __init__(self, model_name: str, config: types.GenerateContentConfig | None = None):
+    def __init__(self, model_name: str, config=None):
+        if genai is None or types is None:
+            raise RuntimeError("Install google-genai to use Gemini-backed generation")
         self._model = model_name
         self._config = config or types.GenerateContentConfig(safety_settings=_SAFETY_OFF)
 
