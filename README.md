@@ -149,6 +149,24 @@ By default, the generated dataset will be pushed to a HuggingFace repo
 ### Data Source
 
 * miniF2F: We use [miniF2F-Test-PF](https://github.com/PrithwishJana/ProofBridge/blob/bb0f247a62077a273058daa966472f0f109c92f2/datasets_validation/minif2f/dataset.jsonl) processed by [ProofBridge](https://arxiv.org/pdf/2510.15681), which includes NL proofs. The dataset has been attached at [`data/minif2f.jsonl`](data/minif2f.jsonl).
+* MATH-500: We use [HuggingFaceH4/MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500). To build the local source JSONL in the same schema as miniF2F, run:
+  ```bash
+  python math500.py --output data/math500.jsonl
+  ```
+  `build.py --split MATH500` will also create this file automatically if it is missing.
+
+### Pipeline for global perturbations
+
+To construct the original split plus the four meaning-preserving global variants:
+```bash
+python build.py --type global --split miniF2F --style all --variant-model all
+python build.py --type global --split MATH500 --style all --variant-model all
+```
+
+`--style original` creates only `global_original` and does not call any model API.
+`--variant-model gemini` uses Gemini through `GOOGLE_API_KEY`; `--variant-model qwen3`
+uses an OpenAI-compatible endpoint through `NRP_LLM_KEY` and optional
+`NRP_LLM_BASE_URL`.
 
 ### Pipeline for local perturbations
 
@@ -157,4 +175,9 @@ To construct local perturbations, run:
 python build.py --type number --split miniF2F
 python build.py --type symbol --split miniF2F
 python build.py --type step   --split miniF2F
+python build.py --type number --split MATH500
+python build.py --type symbol --split MATH500
+python build.py --type step   --split MATH500
 ```
+
+For dry runs that only write local intermediate JSONL files, pass `--no-push`.
