@@ -6,6 +6,8 @@
 Code for paper: [Evaluating the Robustness of Proof Autoformalization in Lean 4](https://arxiv.org/abs/2606.14867), by Zhengtao Gui, Sheng Yang, and Zhouxing Shi.
 In the 3rd AI for Math Workshop at ICML 2026.
 
+**Update (October 2026).** The code follows the revised paper (arXiv v3). Step deletion is judged by gap retention: an output is faithful if it leaves the retained claim unproved or assumed, and reverted if it derives the claim with any tactic. FR and RR are computed over identifiable (faithful or reverted) outputs, and the share of unclear outputs is reported as UR.
+
 This work evaluates the robustness of proof autoformalization in [Lean 4](https://lean-lang.org/).
 Proof autoformalization aims to translate a mathematical informal proof written in natural language into a formal proof in a formal language such as Lean 4.
 A robust proof autoformalizer must remain faithful even for informal proofs that diverge from idealized ones, and we present the first study on it.
@@ -95,6 +97,8 @@ python llm_inference.py \
     --eval_dir results/miniF2F
 ```
 
+The paper samples one output per input with temperature 0.6 and top-p 0.95; pass `--temperature 0.6 --top_p 0.95` to use these settings for vLLM models.
+
 #### ProofFlow
 
 [ProofFlow](https://github.com/Huawei-AI4Math/ProofFlow) is a pipelined proof autoformalizer.
@@ -121,6 +125,8 @@ python proofflow_inference.py \
     --eval_dir results/miniF2F
 ```
 
+By default all ProofFlow components use Gemini. In the paper, the graph builder is Gemini-2.5-Flash and the lemma formalizer and prover are `Goedel-LM/Goedel-Formalizer-V2-8B` and `Goedel-LM/Goedel-Prover-V2-8B`, served through an OpenAI-compatible endpoint; set them with `--graph_model`, `--formalize_model`, `--solver_model` and the matching `--*_base_url` options.
+
 ### Scoring
 
 Type-check the generated Lean and run the semantic-consistency judge:
@@ -130,7 +136,7 @@ python evaluate.py tcsc \
     --input results/miniF2F/ProofBridge-SFT-only/local_number_edit_statement_output.jsonl
 ```
 
-Score edit-faithfulness (FR / RR / OUR) for a perturbation type:
+Score edit-faithfulness (FR / RR / UR) for a perturbation type. FR and RR are computed over identifiable (faithful or reverted) outputs and UR over all outputs:
 
 ```bash
 python evaluate.py edit \

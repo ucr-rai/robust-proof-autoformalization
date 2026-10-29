@@ -93,6 +93,18 @@ def parse_args():
         default=0,
         help="Only run inference on the first N examples (0 = all)",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature (default: 0.6 for Gemini, the model's generation_config for vLLM models)",
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=None,
+        help="Top-p (default: 0.95 for Gemini, the model's generation_config for vLLM models)",
+    )
 
     return parser.parse_args()
 
@@ -279,8 +291,8 @@ def inference_on_dataset(args):
         gemini_config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             safety_settings=_SAFETY_OFF,
-            temperature=0.6,
-            top_p=0.95,
+            temperature=0.6 if args.temperature is None else args.temperature,
+            top_p=0.95 if args.top_p is None else args.top_p,
             max_output_tokens=8192,
         )
         model = _GeminiModel(args.model_id, config=gemini_config)
@@ -296,6 +308,10 @@ def inference_on_dataset(args):
         sampling_params = llm.get_default_sampling_params()
         sampling_params.n = args.num_samples_per_task
         sampling_params.max_tokens = 12000
+        if args.temperature is not None:
+            sampling_params.temperature = args.temperature
+        if args.top_p is not None:
+            sampling_params.top_p = args.top_p
 
     if args.limit > 0:
         list_of_data_dicts = list_of_data_dicts[:args.limit]
