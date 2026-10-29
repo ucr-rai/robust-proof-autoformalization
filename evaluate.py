@@ -162,7 +162,7 @@ def run_tcsc(args):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Edit-faithfulness scoring (FR / RR / OUR)
+# Edit-faithfulness scoring (FR / RR / UR)
 #
 # A perturbation-specific Gemini judge: given one edit (number / symbol / step)
 # and the model's Lean output, decide whether the model carried the edit
@@ -264,38 +264,107 @@ Return strict JSON only (no other text):
   "reason": "one-sentence explanation"}}"""
 
 STEP_EDIT_PROMPT = """\
-You are an expert in mathematical formalization. A math proof was edited by removing the reasoning from one proof step while keeping only the step's outcome/claim. The model then generated a Lean 4 formalization from the edited proof.
+You are an expert in mathematical formalization and Lean 4. A natural-language proof was edited by deleting the justification of one proof step while keeping that step's stated outcome (the "retained claim"). A model then produced a Lean 4 formalization from the edited proof.
 
-Determine whether the model faithfully reflects the missing reasoning.
+Decide whether the Lean code RETAINS the gap left by the deletion or SUPPLIES a justification for the retained claim.
 
---- Edit Info ---
-Deleted reasoning: "{reasoning_text}"
-Preserved outcome: "{outcome_text}"
-Step was last step: {is_last}
+=== Edit Info ===
+Deleted justification: "{reasoning_text}"
+Retained claim: "{outcome_text}"
+The edited step was the last step of the proof: {is_last}
 
---- Edited informal proof (reasoning removed) ---
+=== Edited informal proof (justification removed) ===
 {informal_proof}
 
---- Model-generated Lean 4 code ---
+=== Model-generated Lean 4 code ===
 {generated_fl}
 
-Tasks:
+=== Rules ===
+Comments are not code. Text inside `-- ...` line comments or `/- ... -/` block comments must be ignored when locating the claim and must never be used as evidence.
 
-1. Find where the outcome claim ("{outcome_text}") is formalized in the Lean code. Look for a `have`, `show`, theorem conclusion, or equivalent statement that corresponds to this claim.
+1. Locate where the retained claim is formalized in the Lean code: a `have`, `show`, `obtain`, `calc` step, `suffices`, the theorem conclusion, or an equivalent statement. If the last step was edited, the retained claim may be the theorem's conclusion.
 
-2. Determine how the model handles the proof of that claim:
-   - If the model uses `sorry`, `admit`, leaves it incomplete, or provides a significantly simplified/placeholder proof -> the model is FAITHFUL (it reflected the missing reasoning)
-   - If the model provides a full, substantive tactic proof for this claim (e.g., `by rw [...]; norm_num; linarith`) that reconstructs the deleted reasoning -> the model REVERTED (it fabricated the missing justification)
-   - If the outcome claim is not present at all, or the output is empty/error -> OTHER
+2. Classify how the code handles that claim. Judge what the code supplies, not whether it would type-check: compilation is checked separately by Lean, so do not try to decide whether a tactic would succeed.
+   - "unproved": the claim is stated but given no proof, i.e. an explicit placeholder such as `:= by sorry`, `:= sorry`, `admit`, or `?_`. Never choose "unproved" because you think a supplied tactic is insufficient, the claim is false, or the code would not compile; if tactics are written for the claim, it is "derived".
+   - "assumed": the claim is taken as given rather than derived, e.g. it appears as a hypothesis or axiom, or it is used later without ever being proved.
+   - "derived": the code supplies a proof for the claim. Any tactic proof written for the claim counts, regardless of length and regardless of whether it would compile. A single automation tactic such as `nlinarith [sq_nonneg (x - 3)]`, `linarith`, `norm_num`, `simp`, `ring_nf`, `field_simp`, `omega`, `decide`, `positivity`, or `exact <lemma>` supplies the justification when it closes the claim. Do not treat a proof as missing merely because it is short.
+   - "absent": the claim cannot be located in the code, or the output is empty or an error.
 
-IMPORTANT — ground your judgment in evidence; do not hallucinate. Before returning "faithful" or "reverted", you MUST be able to point to the literal Lean code that supports your call: for "faithful" the placeholder/sorry/simplified token(s), for "reverted" the substantive tactic block(s) that reconstruct the deleted reasoning. If you cannot find such literal evidence, return judgment="other". The evidence_in_fl field is the proof of your judgment — it must be copied verbatim from the Lean code.
+3. Map to a judgment: "unproved" or "assumed" -> "faithful" (the gap is retained); "derived" -> "reverted" (the justification is supplied); "absent" -> "other".
+
+IMPORTANT: ground your judgment in evidence. For "faithful" or "reverted", copy verbatim a snippet of Lean CODE (not a comment) of at most about 80 characters that shows how the claim is handled: the `sorry`/`?_`/hypothesis for "faithful", or the claim together with the tactic that proves it for "reverted". If you cannot point to such code, return handling="absent" and judgment="other".
 
 Return strict JSON only (no other text):
-{{"outcome_present": true/false,
-  "proof_method": "sorry"/"placeholder"/"simplified"/"full"/"absent" (pick exactly one),
-  "evidence_in_fl": "if judgment is faithful or reverted, copy the relevant ~80-character snippet of Lean code that supports the verdict, preserving exact characters; otherwise empty string",
+{{"claim_location": "copy the Lean code line where the retained claim is stated, or empty string",
+  "handling": "unproved"/"assumed"/"derived"/"absent",
+  "evidence_in_fl": "verbatim Lean code snippet supporting the judgment, or empty string",
   "judgment": "faithful"/"reverted"/"other",
   "reason": "one-sentence explanation"}}"""
+
+
+# Step deletion is judged by gap retention: a retained claim that the Lean code
+# leaves unproved or assumed is faithful, and a claim the code derives -- with
+# any tactic, however short -- is reverted. The judge's fields are checked
+# deterministically against the comment-free Lean code.
+
+_BLOCK_COMMENT = _re.compile(r"/-[\s\S]*?-/")
+_LINE_COMMENT = _re.compile(r"--[^\n]*")
+_PLACEHOLDER = _re.compile(r"\bsorry\b|\badmit\b|\?_")
+_DECL_START = ("theorem", "lemma", "example", "def", "instance", "noncomputable", "namespace", "end", "open")
+_HANDLING_TO_JUDGMENT = {"unproved": "faithful", "assumed": "faithful", "derived": "reverted", "absent": "other"}
+
+
+def strip_lean_comments(code):
+    """Remove `/- ... -/` block comments and `-- ...` line comments."""
+    return _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", code or ""))
+
+
+def _squash(s):
+    """Drop whitespace and `;` so line breaks and `;` separators compare equal."""
+    return _re.sub(r"[\s;]+", "", s or "")
+
+
+def evidence_in_code(evidence, code):
+    """True if every piece of the quoted evidence (split at "...") occurs in the comment-free code."""
+    pieces = [_squash(x) for x in _re.split(r"\.\.\.|\u2026", strip_lean_comments(evidence))]
+    pieces = [x for x in pieces if x]
+    body = _squash(strip_lean_comments(code))
+    return bool(pieces) and all(x in body for x in pieces)
+
+
+def _empty_body_after(evidence, code):
+    """True if the quoted `... := by` is followed by no tactics in the code."""
+    ev, body = _squash(strip_lean_comments(evidence)), _squash(strip_lean_comments(code))
+    idx = body.rfind(ev)
+    if not ev or idx < 0:
+        return False
+    rest = body[idx + len(ev):]
+    return rest == "" or rest.startswith(_DECL_START)
+
+
+def finalize_step(result, code):
+    """Final step-deletion label from the judge's fields."""
+    handling = str(result.get("handling", "")).strip().lower()
+    evidence = result.get("evidence_in_fl", "") or ""
+    overridden = None
+    # "unproved" is reserved for an explicit placeholder or an empty proof body;
+    # if tactics follow the quoted claim, the claim is derived.
+    if handling == "unproved" and not _PLACEHOLDER.search(strip_lean_comments(evidence)):
+        ev = strip_lean_comments(evidence).strip()
+        if not ev:
+            handling, overridden = "absent", "unproved_without_evidence"
+        elif _re.search(r"(:=\s*by|:=|\bby)$", ev):
+            if not _empty_body_after(ev, code):
+                handling, overridden = "derived", "unproved_but_tactics_follow"
+        else:
+            handling, overridden = "derived", "unproved_without_placeholder"
+    judgment = _HANDLING_TO_JUDGMENT.get(handling, result.get("judgment", "other"))
+    evidence_ok = evidence_in_code(evidence, code) if judgment in ("faithful", "reverted") else None
+    if evidence_ok is False:
+        judgment = "other"
+    out = dict(result)
+    out.update(handling=handling, judgment=judgment, overridden=overridden, evidence_ok=evidence_ok)
+    return out
 
 
 # Per-kind adapters. ``prompt_args`` returns the .format() kwargs; ``meta``
@@ -353,7 +422,8 @@ EDIT_SPECS = {
         "uses_region": False,
         "source_field": "",
         "edit_type_field": "",  # constant "step_delete"
-        "result_defaults": {"outcome_present": False, "proof_method": "absent", "evidence_in_fl": ""},
+        "result_defaults": {"claim_location": "", "handling": "absent", "evidence_in_fl": ""},
+        "postprocess": finalize_step,
         "prompt_args": lambda row, frag: dict(
             reasoning_text=row.get("step_edit_target_reasoning_text", ""),
             outcome_text=row.get("step_edit_target_outcome_text", ""),
@@ -391,16 +461,19 @@ def _judge_edit(model, prompt, result_defaults):
     return out
 
 
-def _fr_rr_our(rows):
+def _fr_rr_ur(rows):
+    """FR and RR over identifiable (faithful or reverted) outputs; UR over all outputs."""
     counts = Counter(r["judgment"] for r in rows)
     total = len(rows)
-    fr, rr, our = counts.get("faithful", 0), counts.get("reverted", 0), counts.get("other", 0)
+    fr, rr, ur = counts.get("faithful", 0), counts.get("reverted", 0), counts.get("other", 0)
+    ident = fr + rr
     return {
         "count": total,
-        "FR": round(fr / total, 4) if total else 0,
-        "RR": round(rr / total, 4) if total else 0,
-        "OUR": round(our / total, 4) if total else 0,
-        "counts": {"faithful": fr, "reverted": rr, "other": our},
+        "identifiable": ident,
+        "FR": round(fr / ident, 4) if ident else 0,
+        "RR": round(rr / ident, 4) if ident else 0,
+        "UR": round(ur / total, 4) if total else 0,
+        "counts": {"faithful": fr, "reverted": rr, "unclear": ur},
     }
 
 
@@ -444,6 +517,8 @@ def score_edit(kind, model, rows, output_path, scored_path):
         else:
             prompt = spec["prompt"].format(**spec["prompt_args"](row, fragment))
             result = _judge_edit(model, prompt, spec["result_defaults"])
+            if "postprocess" in spec:
+                result = spec["postprocess"](result, fl_text)
             region_status = "judged"
         edit_type = row.get(spec["edit_type_field"], "") if spec["edit_type_field"] else "step_delete"
         entry = {"name": name, "edit_type": edit_type}
@@ -474,13 +549,13 @@ def score_edit(kind, model, rows, output_path, scored_path):
     by_type = defaultdict(list)
     for r in scored_rows:
         by_type[r.get("edit_type", kind)].append(r)
-    summary = {et: _fr_rr_our(group) for et, group in by_type.items()}
+    summary = {et: _fr_rr_ur(group) for et, group in by_type.items()}
 
-    print(f"\n{'='*50}\n  FR/RR/OUR — {kind}\n{'='*50}")
-    print(f"{'Type':<20} {'FR':>7} {'RR':>7} {'OUR':>7} {'N':>6}")
+    print(f"\n{'='*50}\n  FR/RR/UR — {kind}\n{'='*50}")
+    print(f"{'Type':<20} {'FR':>7} {'RR':>7} {'UR':>7} {'N':>6}")
     print("-" * 50)
     for et, m in summary.items():
-        print(f"{et:<20} {m['FR']:>6.1%} {m['RR']:>6.1%} {m['OUR']:>6.1%} {m['count']:>6}")
+        print(f"{et:<20} {m['FR']:>6.1%} {m['RR']:>6.1%} {m['UR']:>6.1%} {m['count']:>6}")
     return summary
 
 
@@ -500,10 +575,9 @@ def _kind_from_config(config):
 
 
 def run_edit(args):
-    """FR/RR/OUR edit-faithfulness judge (number / symbol / step)."""
-    model = make_gemini_model(args.gemini_model)
-
+    """FR/RR/UR edit-faithfulness judge (number / symbol / step)."""
     kind = _kind_from_config(args.config)
+    model = make_gemini_model(args.gemini_model, temperature=0 if kind == "step" else None)
     scored_output = args.scored_output or _derive_path(args.output_jsonl, "_scored.jsonl")
     summary = args.summary or _derive_path(args.output_jsonl, "_summary.json")
 
@@ -520,7 +594,7 @@ def run_edit(args):
 
 def main():
     p = argparse.ArgumentParser(
-        description="Score inference output: TC/SC (task=tcsc) or edit-faithfulness FR/RR/OUR (task=edit)")
+        description="Score inference output: TC/SC (task=tcsc) or edit-faithfulness FR/RR/UR (task=edit)")
     sub = p.add_subparsers(dest="task", required=True)
 
     t = sub.add_parser("tcsc", help="Type-check (TC) + StmtSC + ProofSC")
@@ -536,7 +610,7 @@ def main():
                    help="Limit number of rows processed (0 for no limit)")
     t.set_defaults(func=run_tcsc)
 
-    e = sub.add_parser("edit", help="FR/RR/OUR edit-faithfulness judge")
+    e = sub.add_parser("edit", help="FR/RR/UR edit-faithfulness judge")
     e.add_argument("--repo-id", default="ucr-rai/RobustPABench", help="HF dataset repo")
     e.add_argument("--config", required=True, help="HF config, e.g. local_number_edit_statement")
     e.add_argument("--split", default="miniF2F", help="HF split to score")

@@ -83,14 +83,17 @@ def _client():
     return _CLIENT
 
 
-def make_gemini_model(model_name: str = "gemini-2.5-flash"):
+def make_gemini_model(model_name: str = "gemini-2.5-flash", temperature: float | None = None):
     """Gemini model factory with safety filters disabled.
 
     Math/Lean content gets false-positively flagged by the default safety
     filter; all four HarmCategory thresholds are set to BLOCK_NONE for academic
     eval. Single source of truth for every Gemini-judge / labeling script.
     """
-    return _GeminiModel(model_name)
+    if temperature is None:
+        return _GeminiModel(model_name)
+    config = types.GenerateContentConfig(safety_settings=_SAFETY_OFF, temperature=temperature)
+    return _GeminiModel(model_name, config=config)
 
 
 # ── Robust LaTeX-JSON parsing ────────────────────────────────────────────────
